@@ -4,9 +4,11 @@ import io
 import logging
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import threading
+import zipfile
 
 import requests
 
@@ -33,6 +35,46 @@ RTVC_ROOT = Path(__file__).parent / "Real-Time-Voice-Cloning"
 ENCODER_MODEL_PATH = RTVC_ROOT / "saved_models/default/encoder.pt"
 SYNTHESIZER_MODEL_PATH = RTVC_ROOT / "saved_models/default/synthesizer.pt"
 VOCODER_MODEL_PATH = RTVC_ROOT / "saved_models/default/vocoder.pt"
+RTVC_REPO_ZIP_URL = os.getenv(
+    "RTVC_REPO_ZIP_URL",
+    "https://codeload.github.com/CorentinJ/Real-Time-Voice-Cloning/zip/refs/heads/master",
+)
+
+
+def _download_file(url: str, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with requests.get(url, stream=True, timeout=120) as response:
+        response.raise_for_status()
+        with open(target_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+
+def _bootstrap_rtvc_repo() -> None:
+    if RTVC_ROOT.exists():
+        return
+
+    logging.info("STS: downloading RTVC repository archive...")
+    temp_dir = Path(tempfile.mkdtemp(prefix="rtvc_repo_"))
+    archive_path = temp_dir / "rtvc.zip"
+
+    try:
+        _download_file(RTVC_REPO_ZIP_URL, archive_path)
+        with zipfile.ZipFile(archive_path, "r") as zip_ref:
+            zip_ref.extractall(temp_dir)
+
+        extracted_root = temp_dir / "Real-Time-Voice-Cloning-master"
+        if not extracted_root.exists():
+            raise RuntimeError("Downloaded RTVC archive does not contain expected root directory")
+
+        shutil.move(str(extracted_root), str(RTVC_ROOT))
+        logging.info("STS: RTVC repository extracted to %s", RTVC_ROOT)
+    finally:
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _ensure_rtvc_modules() -> bool:
@@ -44,6 +86,7 @@ def _ensure_rtvc_modules() -> bool:
 
     _rtvc_checked = True
     try:
+        _bootstrap_rtvc_repo()
         if not RTVC_ROOT.exists():
             raise FileNotFoundError(f"Real-Time-Voice-Cloning directory not found at {RTVC_ROOT}")
 
@@ -54,6 +97,7 @@ def _ensure_rtvc_modules() -> bool:
         import whisper as _whisper
         from encoder import inference as _encoder
         from synthesizer.inference import Synthesizer as _Synthesizer
+        from utils.default_models import ensure_default_models as _ensure_default_models
         from vocoder import inference as _vocoder
 
         encoder = _encoder
@@ -61,6 +105,10 @@ def _ensure_rtvc_modules() -> bool:
         vocoder = _vocoder
         np = _np
         whisper = _whisper
+
+        # Download default model files from Hugging Face when missing.
+        _ensure_default_models(RTVC_ROOT / "saved_models")
+
         _rtvc_ready = True
         logging.info("STS RTVC stack detected")
     except Exception as e:
