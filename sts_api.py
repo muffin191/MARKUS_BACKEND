@@ -357,7 +357,8 @@ def sts_chat():
     with _embed_lock:
         embed = _cached_embed
 
-    if _ensure_models_loaded() and embed is not None and not isinstance(embed, (bytes, bytearray)):
+    # Keep text-mode STS fast: only use RTVC if models are already loaded.
+    if _models_loaded and embed is not None and not isinstance(embed, (bytes, bytearray)):
         out_buffer = _synthesize_with_embed(reply_text, embed)
     else:
         out_buffer = _basic_tts_wav(reply_text)
