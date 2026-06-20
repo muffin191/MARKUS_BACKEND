@@ -32,6 +32,16 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+STS_ENABLED = False
+try:
+    from sts_api import sts
+
+    app.register_blueprint(sts)
+    STS_ENABLED = True
+    logger.info("STS voice cloning loaded")
+except Exception as e:
+    logger.warning("STS voice cloning not available: %s", e)
+
 # Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi3:mini")
@@ -350,6 +360,7 @@ def health():
         "mem0_enabled": HAS_MEM0 and MEM0_CLIENT is not None,
         "has_mem0_api_key": bool(MEM0_API_KEY),
         "mem0_library_loaded": MemoryClient is not None,
+        "sts_enabled": STS_ENABLED,
     })
 
 @app.route("/chat", methods=["POST"])
