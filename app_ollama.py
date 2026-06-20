@@ -17,6 +17,13 @@ try:
 except ImportError:
     genai = None
 
+try:
+    from mem0 import MemoryClient
+    HAS_MEM0 = True
+except ImportError:
+    MemoryClient = None
+    HAS_MEM0 = False
+
 load_dotenv(override=True)
 
 # Configure logging
@@ -41,6 +48,15 @@ if GOOGLE_API_KEY and genai is not None:
     )
 else:
     GEMINI_CLIENT = None
+
+MEM0_CLIENT = None
+if HAS_MEM0:
+    try:
+        MEM0_CLIENT = MemoryClient()
+        logger.info("mem0 client initialized successfully")
+    except Exception as e:
+        logger.warning("Failed to initialize mem0: %s", e)
+        HAS_MEM0 = False
 
 _MODEL_CACHE: str | None = None
 _PREFERRED_MODELS = [
@@ -102,6 +118,49 @@ def _load_memory() -> None:
         conversation_history = {}
 
 
+def _get_mem0_memories(user_id: str) -> str:
+    if not HAS_MEM0 or MEM0_CLIENT is None:
+        return ""
+
+    try:
+        results = MEM0_CLIENT.get_all(user_id=user_id, filters={"user_id": user_id})
+        if not results:
+            return ""
+
+        raw_memories = results if isinstance(results, list) else results.get("results", [])
+        memory_lines: List[str] = []
+        for entry in raw_memories[:10]:
+            if isinstance(entry, dict):
+                memory_text = entry.get("memory", entry.get("text", ""))
+            else:
+                memory_text = str(entry)
+
+            cleaned = str(memory_text).strip()
+            if cleaned:
+                memory_lines.append(cleaned)
+
+        return "\n- ".join(memory_lines)
+    except Exception as e:
+        logger.warning("Could not fetch mem0 memories for %s: %s", user_id, e)
+        return ""
+
+
+def _save_mem0_memory(user_id: str, user_message: str, assistant_message: str) -> None:
+    if not HAS_MEM0 or MEM0_CLIENT is None:
+        return
+
+    try:
+        MEM0_CLIENT.add(
+            [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": assistant_message},
+            ],
+            user_id=user_id,
+        )
+    except Exception as e:
+        logger.warning("Could not save mem0 memories for %s: %s", user_id, e)
+
+
 def _save_memory() -> None:
     """Persist memory to disk atomically."""
     try:
@@ -140,6 +199,11 @@ def get_ollama_response(message: str, user_id: str = "default", use_memory: bool
             recent = history[-10:]
             for msg in recent:
                 context += f"\n{msg['role']}: {msg['content']}"
+
+        if use_memory:
+            memories = _get_mem0_memories(user_id)
+            if memories:
+                context += f"\n\nWhat you remember about this user:\n- {memories}"
         
         # Create the prompt
         full_message = f"{context}\nuser: {message}\nassistant:"
@@ -172,6 +236,7 @@ def get_ollama_response(message: str, user_id: str = "default", use_memory: bool
         if use_memory:
             _append_message(user_id, "user", message)
             _append_message(user_id, "assistant", assistant_message)
+            _save_mem0_memory(user_id, message, assistant_message)
 
         return assistant_message
     
@@ -275,6 +340,7 @@ def health():
         "has_google_api_key": bool(GOOGLE_API_KEY),
         "gemini_library_loaded": genai is not None,
         "gemini_client_ready": GEMINI_CLIENT is not None,
+        "mem0_enabled": HAS_MEM0 and MEM0_CLIENT is not None,
     })
 
 @app.route("/chat", methods=["POST"])

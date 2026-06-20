@@ -1,6 +1,7 @@
 Flask==2.3.0
 gunicorn==21.2.0
 google-genai==1.21.1
+mem0ai==0.1.93
 requests==2.31.0
 python-dotenv==1.0.0
 pyttsx3==2.90
