@@ -271,7 +271,10 @@ def health():
         "status": "ok" if provider_healthy else "degraded",
         "provider": provider,
         "ollama_running": provider_healthy if provider == "ollama" else False,
-        "model": model_name
+        "model": model_name,
+        "has_google_api_key": bool(GOOGLE_API_KEY),
+        "gemini_library_loaded": genai is not None,
+        "gemini_client_ready": GEMINI_CLIENT is not None,
     })
 
 @app.route("/chat", methods=["POST"])
