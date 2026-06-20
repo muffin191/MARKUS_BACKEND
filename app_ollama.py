@@ -70,6 +70,9 @@ def _append_message(user_id: str, role: str, content: str) -> None:
     )
     _save_memory()
 
+
+_load_memory()
+
 def get_ollama_response(message: str, user_id: str = "default", use_memory: bool = True) -> str:
     """Get response from Ollama local AI model"""
     try:
@@ -293,7 +296,6 @@ def list_models():
     })
 
 if __name__ == "__main__":
-    _load_memory()
     print(f"Starting JARVIS backend with Ollama...")
     print(f"Ollama URL: {OLLAMA_URL}")
     print(f"Model: {OLLAMA_MODEL}")
