@@ -188,9 +188,15 @@ def _append_message(user_id: str, role: str, content: str) -> None:
 
 _load_memory()
 
-def get_ollama_response(message: str, user_id: str = "default", use_memory: bool = True) -> str:
+def get_ollama_response(
+    message: str,
+    user_id: str = "default",
+    use_memory: bool = True,
+    memory_user_id: str | None = None,
+) -> str:
     """Get response from the configured AI provider."""
     try:
+        memory_identity = memory_user_id or user_id
         history = conversation_history.get(user_id, []) if use_memory else []
         
         # Build context from recent conversation
@@ -202,7 +208,7 @@ def get_ollama_response(message: str, user_id: str = "default", use_memory: bool
                 context += f"\n{msg['role']}: {msg['content']}"
 
         if use_memory:
-            memories = _get_mem0_memories(user_id)
+            memories = _get_mem0_memories(memory_identity)
             if memories:
                 context += f"\n\nWhat you remember about this user:\n- {memories}"
         
@@ -237,7 +243,7 @@ def get_ollama_response(message: str, user_id: str = "default", use_memory: bool
         if use_memory:
             _append_message(user_id, "user", message)
             _append_message(user_id, "assistant", assistant_message)
-            _save_mem0_memory(user_id, message, assistant_message)
+            _save_mem0_memory(memory_identity, message, assistant_message)
 
         return assistant_message
     
@@ -355,18 +361,25 @@ def chat():
         use_memory = data.get("use_memory", True)
         enable_tools = data.get("enable_tools", False)
         user_id = data.get("user_id", "default")
+        memory_user_id = data.get("memory_user_id")
         
         if not message:
             return jsonify({"error": "Empty message"}), 400
         
         # Get response from Ollama
-        response_text = get_ollama_response(message, user_id, use_memory)
+        response_text = get_ollama_response(
+            message,
+            user_id,
+            use_memory,
+            memory_user_id=memory_user_id,
+        )
         
         return jsonify({
             "response": response_text,
             "model": OLLAMA_MODEL,
             "timestamp": datetime.now().isoformat(),
-            "user_id": user_id
+            "user_id": user_id,
+            "memory_user_id": memory_user_id or user_id,
         })
     
     except Exception as e:
