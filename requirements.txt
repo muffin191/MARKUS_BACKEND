@@ -13,3 +13,4 @@ scikit-learn
 librosa
 soundfile
 huggingface-hub
+matplotlib
