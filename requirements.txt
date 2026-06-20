@@ -14,3 +14,4 @@ librosa
 soundfile
 huggingface-hub
 matplotlib
+unidecode
