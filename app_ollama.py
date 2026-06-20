@@ -40,6 +40,7 @@ GOOGLE_MODEL_OVERRIDE = os.getenv("GOOGLE_MODEL")
 GOOGLE_API_VERSION = os.getenv("GOOGLE_API_VERSION", "v1")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "piper")  # piper, espeak, or similar
 MEMORY_FILE = os.getenv("JARVIS_MEMORY_FILE", "jarvis_memory.json")
+MEM0_API_KEY = os.getenv("MEM0_API_KEY")
 
 if GOOGLE_API_KEY and genai is not None:
     GEMINI_CLIENT = genai.Client(
@@ -341,6 +342,8 @@ def health():
         "gemini_library_loaded": genai is not None,
         "gemini_client_ready": GEMINI_CLIENT is not None,
         "mem0_enabled": HAS_MEM0 and MEM0_CLIENT is not None,
+        "has_mem0_api_key": bool(MEM0_API_KEY),
+        "mem0_library_loaded": MemoryClient is not None,
     })
 
 @app.route("/chat", methods=["POST"])
