@@ -1,10 +1,12 @@
 from flask import Blueprint, request, send_file, jsonify
 import base64
 import io
+import importlib.util
 import logging
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -40,6 +42,20 @@ RTVC_REPO_ZIP_URL = os.getenv(
     "https://codeload.github.com/CorentinJ/Real-Time-Voice-Cloning/zip/refs/heads/master",
 )
 
+RUNTIME_DEPENDENCIES = {
+    "numpy": "numpy",
+    "whisper": "openai-whisper",
+    "torch": "torch",
+    "librosa": "librosa",
+    "soundfile": "soundfile",
+    "matplotlib": "matplotlib",
+    "scipy": "scipy",
+    "sklearn": "scikit-learn",
+    "huggingface_hub": "huggingface-hub",
+    "unidecode": "Unidecode",
+    "inflect": "inflect",
+}
+
 
 def _download_file(url: str, target_path: Path) -> None:
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -49,6 +65,23 @@ def _download_file(url: str, target_path: Path) -> None:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     f.write(chunk)
+
+
+def _ensure_runtime_dependencies() -> None:
+    missing = []
+    for module_name, package_name in RUNTIME_DEPENDENCIES.items():
+        if importlib.util.find_spec(module_name) is None:
+            missing.append(package_name)
+
+    if not missing:
+        return
+
+    logging.warning("STS: installing missing runtime dependencies: %s", ", ".join(missing))
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--no-cache-dir", *missing],
+        check=True,
+        timeout=900,
+    )
 
 
 def _bootstrap_rtvc_repo() -> None:
@@ -86,6 +119,7 @@ def _ensure_rtvc_modules() -> bool:
 
     _rtvc_checked = True
     try:
+        _ensure_runtime_dependencies()
         _bootstrap_rtvc_repo()
         if not RTVC_ROOT.exists():
             raise FileNotFoundError(f"Real-Time-Voice-Cloning directory not found at {RTVC_ROOT}")
