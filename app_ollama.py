@@ -10,6 +10,14 @@ import logging
 from datetime import datetime
 import os
 from typing import Dict, List
+from dotenv import load_dotenv
+
+try:
+    from google import genai
+except ImportError:
+    genai = None
+
+load_dotenv(override=True)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,11 +28,58 @@ app = Flask(__name__)
 # Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi3:mini")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_MODEL_OVERRIDE = os.getenv("GOOGLE_MODEL")
+GOOGLE_API_VERSION = os.getenv("GOOGLE_API_VERSION", "v1")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "piper")  # piper, espeak, or similar
 MEMORY_FILE = os.getenv("JARVIS_MEMORY_FILE", "jarvis_memory.json")
 
+if GOOGLE_API_KEY and genai is not None:
+    GEMINI_CLIENT = genai.Client(
+        api_key=GOOGLE_API_KEY,
+        http_options={"api_version": GOOGLE_API_VERSION},
+    )
+else:
+    GEMINI_CLIENT = None
+
+_MODEL_CACHE: str | None = None
+_PREFERRED_MODELS = [
+    "models/gemini-flash-latest",
+    "models/gemini-2.5-flash",
+    "models/gemini-2.0-flash",
+    "models/gemini-2.0-flash-lite",
+]
+
 # Conversation memory (persisted to disk)
 conversation_history: Dict[str, List[dict]] = {}
+
+
+def _provider_name() -> str:
+    return "gemini" if GEMINI_CLIENT is not None else "ollama"
+
+
+def _get_content_model() -> str:
+    global _MODEL_CACHE
+    if _MODEL_CACHE:
+        return _MODEL_CACHE
+    if GOOGLE_MODEL_OVERRIDE:
+        _MODEL_CACHE = GOOGLE_MODEL_OVERRIDE
+        return GOOGLE_MODEL_OVERRIDE
+    if GEMINI_CLIENT is None:
+        return OLLAMA_MODEL
+    try:
+        available = list(GEMINI_CLIENT.models.list())
+        available_names = [model.name for model in available]
+        for preferred in _PREFERRED_MODELS:
+            if preferred in available_names:
+                _MODEL_CACHE = preferred
+                return preferred
+        if available_names:
+            _MODEL_CACHE = available_names[0]
+            return available_names[0]
+    except Exception as e:
+        logger.warning("Gemini model selection failed, using fallback: %s", e)
+    return "models/gemini-flash-latest"
 
 
 def _load_memory() -> None:
@@ -74,7 +129,7 @@ def _append_message(user_id: str, role: str, content: str) -> None:
 _load_memory()
 
 def get_ollama_response(message: str, user_id: str = "default", use_memory: bool = True) -> str:
-    """Get response from Ollama local AI model"""
+    """Get response from the configured AI provider."""
     try:
         history = conversation_history.get(user_id, []) if use_memory else []
         
@@ -88,35 +143,40 @@ def get_ollama_response(message: str, user_id: str = "default", use_memory: bool
         
         # Create the prompt
         full_message = f"{context}\nuser: {message}\nassistant:"
-        
-        # Call Ollama API
-        response = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": full_message,
-                "stream": False,
-                "temperature": 0.7,
-                "top_p": 0.9,
-            },
-            timeout=120  # Increased timeout for model warmup
-        )
-        
-        if response.status_code == 200:
+        if GEMINI_CLIENT is not None:
+            response = GEMINI_CLIENT.models.generate_content(
+                model=_get_content_model(),
+                contents=full_message,
+            )
+            assistant_message = (response.text or "").strip()
+        else:
+            response = requests.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "prompt": full_message,
+                    "stream": False,
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                },
+                timeout=120,
+            )
+
+            if response.status_code != 200:
+                logger.error("Ollama error: %s", response.status_code)
+                return "Error: Could not get response from AI model"
+
             result = response.json()
             assistant_message = result.get("response", "").strip()
 
-            if use_memory:
-                _append_message(user_id, "user", message)
-                _append_message(user_id, "assistant", assistant_message)
-            
-            return assistant_message
-        else:
-            logger.error(f"Ollama error: {response.status_code}")
-            return "Error: Could not get response from AI model"
+        if use_memory:
+            _append_message(user_id, "user", message)
+            _append_message(user_id, "assistant", assistant_message)
+
+        return assistant_message
     
     except requests.exceptions.ConnectionError:
-        return "Error: Cannot connect to Ollama. Make sure 'ollama serve' is running on localhost:11434"
+        return "Error: Cannot connect to Ollama. Make sure 'ollama serve' is running on localhost:11434, or set GOOGLE_API_KEY for a hosted model."
     except Exception as e:
         logger.error(f"Error getting Ollama response: {e}")
         return f"Error: {str(e)}"
@@ -195,16 +255,23 @@ def generate_tts(text: str, voice: str = "onyx") -> bytes:
 @app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint"""
-    try:
-        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
-        ollama_healthy = response.status_code == 200
-    except:
-        ollama_healthy = False
-    
+    provider = _provider_name()
+    if provider == "gemini":
+        provider_healthy = GEMINI_CLIENT is not None
+        model_name = _get_content_model()
+    else:
+        try:
+            response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+            provider_healthy = response.status_code == 200
+        except Exception:
+            provider_healthy = False
+        model_name = OLLAMA_MODEL
+
     return jsonify({
-        "status": "ok" if ollama_healthy else "degraded",
-        "ollama_running": ollama_healthy,
-        "model": OLLAMA_MODEL
+        "status": "ok" if provider_healthy else "degraded",
+        "provider": provider,
+        "ollama_running": provider_healthy if provider == "ollama" else False,
+        "model": model_name
     })
 
 @app.route("/chat", methods=["POST"])
@@ -278,13 +345,22 @@ def clear_history():
 @app.route("/models", methods=["GET"])
 def list_models():
     """List available Ollama models"""
+    if GEMINI_CLIENT is not None:
+        current_model = _get_content_model()
+        return jsonify({
+            "available_models": [current_model],
+            "current_model": current_model,
+            "provider": "gemini",
+        })
+
     try:
         response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
         if response.status_code == 200:
             models = response.json().get("models", [])
             return jsonify({
                 "available_models": [m["name"] for m in models],
-                "current_model": OLLAMA_MODEL
+                "current_model": OLLAMA_MODEL,
+                "provider": "ollama",
             })
     except:
         pass
@@ -292,6 +368,7 @@ def list_models():
     return jsonify({
         "available_models": [],
         "current_model": OLLAMA_MODEL,
+        "provider": "ollama",
         "status": "Unable to connect to Ollama"
     })
 
