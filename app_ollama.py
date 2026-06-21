@@ -264,73 +264,33 @@ def get_ollama_response(
         return f"Error: {str(e)}"
 
 def generate_tts(text: str, voice: str = "onyx") -> bytes:
-    """Generate TTS audio bytes as WAV.
-
-    Order of attempts:
-    1) pyttsx3 (works on Windows with built-in SAPI voices)
-    2) piper
-    3) espeak-ng
-    """
+    """Generate TTS audio bytes as WAV using pyttsx3 only."""
     try:
-        # Preferred on Windows desktop.
-        try:
-            import tempfile
-            import pyttsx3
+        import tempfile
+        import pyttsx3
 
-            fd, wav_path = tempfile.mkstemp(prefix="jarvis_tts_", suffix=".wav")
-            os.close(fd)
+        fd, wav_path = tempfile.mkstemp(prefix="jarvis_tts_", suffix=".wav")
+        os.close(fd)
+        try:
+            engine = pyttsx3.init()
+            engine.setProperty("rate", 180)
+            engine.save_to_file(text, wav_path)
+            engine.runAndWait()
+            with open(wav_path, "rb") as f:
+                data = f.read()
+            if data:
+                return data
+            logger.warning("pyttsx3 returned no audio data")
+            return None
+        finally:
             try:
-                engine = pyttsx3.init()
-                engine.setProperty("rate", 180)
-                engine.save_to_file(text, wav_path)
-                engine.runAndWait()
-                with open(wav_path, "rb") as f:
-                    data = f.read()
-                if data:
-                    return data
-            finally:
-                try:
-                    os.remove(wav_path)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        
-        # Check if piper is available
-        try:
-            import subprocess
-            # Using piper locally if available
-            proc = subprocess.run(
-                ["piper", "--model", f"en_US-{voice}-medium"],
-                input=text.encode(),
-                capture_output=True,
-                timeout=30
-            )
-            if proc.returncode == 0:
-                return proc.stdout
-        except:
-            pass
-        
-        # Fallback: use espeak if piper not available
-        try:
-            import subprocess
-            proc = subprocess.run(
-                ["espeak-ng", "-w", "/dev/stdout"],
-                input=text.encode(),
-                capture_output=True,
-                timeout=10
-            )
-            if proc.returncode == 0:
-                return proc.stdout
-        except:
-            pass
-        
-        logger.warning("No TTS engine available locally")
-        return None
+                os.remove(wav_path)
+            except Exception:
+                pass
     
     except Exception as e:
-        logger.error(f"TTS Error: {e}")
-        return b"Error generating audio"
+        logger.error(f"pyttsx3 TTS error: {e}")
+        return None
 
 # ============= API Routes =============
 
