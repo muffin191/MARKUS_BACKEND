@@ -21,6 +21,8 @@ _cached_embed = None
 
 _models_lock = threading.Lock()
 _models_loaded = False
+_whisper_lock = threading.Lock()
+_whisper_ready = False
 _rtvc_checked = False
 _rtvc_ready = False
 _rtvc_error = ""
@@ -153,6 +155,33 @@ def _ensure_rtvc_modules() -> bool:
     return _rtvc_ready
 
 
+def _ensure_whisper_loaded() -> bool:
+    global _whisper_ready, whisper, whisper_model
+
+    if _whisper_ready and whisper_model is not None:
+        return True
+
+    with _whisper_lock:
+        if _whisper_ready and whisper_model is not None:
+            return True
+
+        try:
+            _ensure_runtime_dependencies()
+            if whisper is None:
+                import whisper as _whisper
+
+                whisper = _whisper
+
+            model_name = os.getenv("STS_WHISPER_MODEL", "base")
+            logging.info("Loading STS Whisper model: %s", model_name)
+            whisper_model = whisper.load_model(model_name)
+            _whisper_ready = True
+            return True
+        except Exception as e:
+            logging.warning("STS Whisper unavailable: %s", e)
+            return False
+
+
 def _ensure_models_loaded() -> bool:
     global _models_loaded, synthesizer, whisper_model
     if _models_loaded:
@@ -168,9 +197,9 @@ def _ensure_models_loaded() -> bool:
         synth = Synthesizer(SYNTHESIZER_MODEL_PATH, verbose=False)
         synth.load()
         vocoder.load_model(VOCODER_MODEL_PATH, verbose=False)
-        whisper_model_local = whisper.load_model("base")
+        if not _ensure_whisper_loaded():
+            return False
         synthesizer = synth
-        whisper_model = whisper_model_local
         _models_loaded = True
         logging.info("STS RTVC models loaded")
     return True
@@ -238,6 +267,7 @@ def sts_status():
             "mode": "rtvc" if rtvc_ready else "fallback",
             "rtvc_ready": rtvc_ready,
             "models_loaded": _models_loaded,
+            "whisper_ready": _whisper_ready,
             "reason": _rtvc_error if not rtvc_ready else "",
         }
     )
@@ -323,10 +353,17 @@ def speak_with_cached_voice():
 
 @sts.route("/sts/chat", methods=["POST"])
 def sts_chat():
-    agent_mode = request.form.get("agentMode", "false").lower() in ("1", "true", "yes", "on")
+    json_payload = request.get_json(silent=True) or {}
+    agent_mode_value = request.form.get("agentMode")
+    if agent_mode_value is None:
+        agent_mode_value = request.args.get("agentMode")
+    if agent_mode_value is None:
+        agent_mode = bool(json_payload.get("agentMode"))
+    else:
+        agent_mode = agent_mode_value.lower() in ("1", "true", "yes", "on")
 
     transcript = ""
-    if _ensure_models_loaded() and "source_audio" in request.files:
+    if "source_audio" in request.files and _ensure_whisper_loaded():
         source_file = request.files["source_audio"]
         suffix = Path(source_file.filename or "").suffix or ".wav"
         source_fd, source_path = tempfile.mkstemp(suffix=suffix)
@@ -342,7 +379,7 @@ def sts_chat():
         transcript = (
             request.form.get("text")
             or request.args.get("text")
-            or (request.get_json(silent=True) or {}).get("text")
+            or json_payload.get("text")
             or ""
         ).strip()
 
