@@ -1,6 +1,7 @@
 from flask import Blueprint, request, send_file, jsonify
 import base64
 import io
+import importlib
 import importlib.util
 import logging
 import os
@@ -243,6 +244,20 @@ def _synthesize_with_embed(text, embed):
 
 def _call_chat_backend(message: str, agent_mode: bool = False) -> str:
     chat_url = os.getenv("STS_CHAT_URL", "http://localhost:5000/chat")
+
+    if chat_url.startswith("http://localhost:") or chat_url.startswith("http://127.0.0.1:"):
+        for module_name in ("app_ollama", "app"):
+            try:
+                module = importlib.import_module(module_name)
+                get_response = getattr(module, "get_ollama_response", None)
+                if callable(get_response):
+                    reply = str(get_response(message)).strip()
+                    if not reply:
+                        raise RuntimeError("Chat backend returned an empty reply")
+                    return reply
+            except Exception as e:
+                logging.warning("STS local chat dispatch via %s failed: %s", module_name, e)
+
     response = requests.post(
         chat_url,
         json={"message": message, "agentMode": agent_mode},
