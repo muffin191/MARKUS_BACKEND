@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import wave
 import zipfile
 
 import requests
@@ -44,6 +45,9 @@ RTVC_REPO_ZIP_URL = os.getenv(
     "RTVC_REPO_ZIP_URL",
     "https://codeload.github.com/CorentinJ/Real-Time-Voice-Cloning/zip/refs/heads/master",
 )
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
+ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5").strip()
 
 RUNTIME_DEPENDENCIES = {
     "numpy": "numpy",
@@ -207,7 +211,11 @@ def _ensure_models_loaded() -> bool:
 
 
 def _basic_tts_wav(text: str) -> io.BytesIO:
-    """Fallback TTS using pyttsx3 when RTVC stack is unavailable."""
+    """Fallback TTS using ElevenLabs (if configured) or pyttsx3."""
+    elevenlabs_audio = _elevenlabs_tts_wav(text)
+    if elevenlabs_audio is not None:
+        return elevenlabs_audio
+
     import pyttsx3
 
     fd, wav_path = tempfile.mkstemp(prefix="sts_fallback_", suffix=".wav")
@@ -228,6 +236,60 @@ def _basic_tts_wav(text: str) -> io.BytesIO:
     out_buffer = io.BytesIO(data)
     out_buffer.seek(0)
     return out_buffer
+
+
+def _elevenlabs_tts_wav(text: str) -> io.BytesIO | None:
+    if not ELEVENLABS_API_KEY or not ELEVENLABS_VOICE_ID:
+        return None
+
+    url = (
+        f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+        f"?output_format=pcm_16000"
+    )
+
+    payload = {
+        "text": text,
+        "model_id": ELEVENLABS_MODEL_ID,
+        "voice_settings": {
+            "stability": 0.45,
+            "similarity_boost": 0.8,
+            "style": 0.25,
+            "use_speaker_boost": True,
+        },
+    }
+
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/pcm",
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=45)
+        if response.status_code != 200:
+            logging.warning(
+                "ElevenLabs TTS failed (%s): %s",
+                response.status_code,
+                response.text[:200],
+            )
+            return None
+
+        pcm_data = response.content
+        if not pcm_data:
+            return None
+
+        out_buffer = io.BytesIO()
+        with wave.open(out_buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(pcm_data)
+
+        out_buffer.seek(0)
+        return out_buffer
+    except Exception as e:
+        logging.warning("ElevenLabs TTS unavailable, falling back to pyttsx3: %s", e)
+        return None
 
 
 def _synthesize_with_embed(text, embed):
@@ -276,6 +338,7 @@ def _call_chat_backend(message: str, agent_mode: bool = False) -> str:
 @sts.route("/sts/status", methods=["GET"])
 def sts_status():
     rtvc_ready = _ensure_rtvc_modules()
+    tts_provider = "elevenlabs" if ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID else "pyttsx3"
     return jsonify(
         {
             "status": "ok",
@@ -283,6 +346,7 @@ def sts_status():
             "rtvc_ready": rtvc_ready,
             "models_loaded": _models_loaded,
             "whisper_ready": _whisper_ready,
+            "tts_provider": tts_provider,
             "reason": _rtvc_error if not rtvc_ready else "",
         }
     )
