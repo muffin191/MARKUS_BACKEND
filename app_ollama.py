@@ -48,6 +48,8 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "phi3:mini")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_MODEL_OVERRIDE = os.getenv("GOOGLE_MODEL")
 GOOGLE_API_VERSION = os.getenv("GOOGLE_API_VERSION", "v1")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "piper")  # piper, espeak, or similar
 MEMORY_FILE = os.getenv("JARVIS_MEMORY_FILE", "jarvis_memory.json")
 MEM0_API_KEY = os.getenv("MEM0_API_KEY")
@@ -142,6 +144,27 @@ def _generate_gemini_response(contents: str):
     if last_error is not None:
         raise last_error
     raise RuntimeError("No Gemini models are available")
+
+
+def _generate_openai_response(contents: str) -> str:
+    response = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": OPENAI_MODEL,
+            "messages": [{"role": "user", "content": contents}],
+            "temperature": 0.7,
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    choices = response.json().get("choices", [])
+    if not choices:
+        raise RuntimeError("OpenAI returned no chat choices")
+    return str(choices[0].get("message", {}).get("content", "")).strip()
 
 
 def _load_memory() -> None:
@@ -260,8 +283,18 @@ def get_ollama_response(
         # Create the prompt
         full_message = f"{context}\nuser: {message}\nassistant:"
         if GEMINI_CLIENT is not None:
-            response = _generate_gemini_response(full_message)
-            assistant_message = (response.text or "").strip()
+            try:
+                response = _generate_gemini_response(full_message)
+                assistant_message = (response.text or "").strip()
+            except Exception as error:
+                if not _is_gemini_overloaded(error) or not OPENAI_API_KEY:
+                    raise
+                logger.warning("Gemini models are overloaded; using OpenAI fallback")
+                try:
+                    assistant_message = _generate_openai_response(full_message)
+                except Exception as fallback_error:
+                    logger.error("OpenAI fallback failed: %s", fallback_error)
+                    return "AI providers are temporarily unavailable. Please try again shortly."
         else:
             response = requests.post(
                 f"{OLLAMA_URL}/api/generate",
@@ -349,6 +382,7 @@ def health():
         "ollama_running": provider_healthy if provider == "ollama" else False,
         "model": model_name,
         "has_google_api_key": bool(GOOGLE_API_KEY),
+        "openai_fallback_configured": bool(OPENAI_API_KEY),
         "gemini_library_loaded": genai is not None,
         "gemini_client_ready": GEMINI_CLIENT is not None,
         "mem0_enabled": HAS_MEM0 and MEM0_CLIENT is not None,
