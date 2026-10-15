@@ -70,6 +70,7 @@ if HAS_MEM0:
         HAS_MEM0 = False
 
 _MODEL_CACHE: str | None = None
+_AVAILABLE_MODELS: list[str] = []
 _PREFERRED_MODELS = [
     "models/gemini-flash-latest",
     "models/gemini-2.5-flash",
@@ -86,7 +87,7 @@ def _provider_name() -> str:
 
 
 def _get_content_model() -> str:
-    global _MODEL_CACHE
+    global _MODEL_CACHE, _AVAILABLE_MODELS
     if _MODEL_CACHE:
         return _MODEL_CACHE
     if GOOGLE_MODEL_OVERRIDE:
@@ -97,6 +98,7 @@ def _get_content_model() -> str:
     try:
         available = list(GEMINI_CLIENT.models.list())
         available_names = [model.name for model in available]
+        _AVAILABLE_MODELS = [model for model in _PREFERRED_MODELS if model in available_names]
         for preferred in _PREFERRED_MODELS:
             if preferred in available_names:
                 _MODEL_CACHE = preferred
@@ -107,6 +109,39 @@ def _get_content_model() -> str:
     except Exception as e:
         logger.warning("Gemini model selection failed, using fallback: %s", e)
     return "models/gemini-flash-latest"
+
+
+def _is_gemini_overloaded(error: Exception) -> bool:
+    code = getattr(error, "code", None)
+    message = str(error).upper()
+    return code in (429, 503) or "UNAVAILABLE" in message or "RESOURCE_EXHAUSTED" in message
+
+
+def _generate_gemini_response(contents: str):
+    global _MODEL_CACHE
+    primary_model = _get_content_model()
+    candidate_models = [primary_model]
+    candidate_models.extend(
+        model
+        for model in (_AVAILABLE_MODELS or _PREFERRED_MODELS)
+        if model != primary_model
+    )
+    last_error: Exception | None = None
+
+    for model in candidate_models:
+        try:
+            response = GEMINI_CLIENT.models.generate_content(model=model, contents=contents)
+            _MODEL_CACHE = model
+            return response
+        except Exception as error:
+            if not _is_gemini_overloaded(error):
+                raise
+            last_error = error
+            logger.warning("Gemini model %s is overloaded; trying another model", model)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No Gemini models are available")
 
 
 def _load_memory() -> None:
@@ -225,10 +260,7 @@ def get_ollama_response(
         # Create the prompt
         full_message = f"{context}\nuser: {message}\nassistant:"
         if GEMINI_CLIENT is not None:
-            response = GEMINI_CLIENT.models.generate_content(
-                model=_get_content_model(),
-                contents=full_message,
-            )
+            response = _generate_gemini_response(full_message)
             assistant_message = (response.text or "").strip()
         else:
             response = requests.post(
@@ -261,6 +293,8 @@ def get_ollama_response(
         return "Error: Cannot connect to Ollama. Make sure 'ollama serve' is running on localhost:11434, or set GOOGLE_API_KEY for a hosted model."
     except Exception as e:
         logger.error(f"Error getting Ollama response: {e}")
+        if GEMINI_CLIENT is not None and _is_gemini_overloaded(e):
+            return "The AI service is temporarily busy. Please try again in a moment."
         return f"Error: {str(e)}"
 
 def generate_tts(text: str, voice: str = "onyx") -> bytes:
