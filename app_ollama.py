@@ -85,7 +85,9 @@ conversation_history: Dict[str, List[dict]] = {}
 
 
 def _provider_name() -> str:
-    return "gemini" if GEMINI_CLIENT is not None else "ollama"
+    if GEMINI_CLIENT is not None:
+        return "gemini"
+    return "openai" if OPENAI_API_KEY else "ollama"
 
 
 def _get_content_model() -> str:
@@ -295,6 +297,8 @@ def get_ollama_response(
                 except Exception as fallback_error:
                     logger.error("OpenAI fallback failed: %s", fallback_error)
                     return "AI providers are temporarily unavailable. Please try again shortly."
+        elif OPENAI_API_KEY:
+            assistant_message = _generate_openai_response(full_message)
         else:
             response = requests.post(
                 f"{OLLAMA_URL}/api/generate",
@@ -368,6 +372,9 @@ def health():
     if provider == "gemini":
         provider_healthy = GEMINI_CLIENT is not None
         model_name = _get_content_model()
+    elif provider == "openai":
+        provider_healthy = bool(OPENAI_API_KEY)
+        model_name = OPENAI_MODEL
     else:
         try:
             response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
@@ -415,7 +422,13 @@ def chat():
         
         return jsonify({
             "response": response_text,
-            "model": OLLAMA_MODEL,
+            "model": (
+                _get_content_model()
+                if GEMINI_CLIENT is not None
+                else OPENAI_MODEL
+                if OPENAI_API_KEY
+                else OLLAMA_MODEL
+            ),
             "timestamp": datetime.now().isoformat(),
             "user_id": user_id,
             "memory_user_id": memory_user_id or user_id,
